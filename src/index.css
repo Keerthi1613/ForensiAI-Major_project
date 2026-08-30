@@ -1,0 +1,142 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-background text-text-primary font-sans antialiased;
+    min-height: 100vh;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    @apply font-mono font-bold tracking-tight text-text-primary;
+  }
+}
+
+@layer components {
+
+  /* Tactical Card */
+  .soc-card {
+    @apply bg-surface border border-divider rounded-DEFAULT shadow-tactical transition-colors duration-200;
+  }
+
+  /* Typography Utilities */
+  .label-mono {
+    @apply font-mono text-[0.65rem] font-bold uppercase tracking-[0.12em] text-text-secondary;
+  }
+
+  .data-mono {
+    @apply font-mono text-sm tracking-tight;
+  }
+
+  /* Buttons */
+  .btn-primary {
+    @apply px-4 py-2 bg-transparent border border-divider text-primary font-mono text-[0.7rem] font-bold uppercase tracking-wider rounded-DEFAULT transition-all duration-200 hover:border-primary active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-outline {
+    @apply px-4 py-2 bg-transparent border border-divider text-text-secondary font-mono text-[0.7rem] font-bold uppercase tracking-wider rounded-DEFAULT transition-all duration-200 hover:border-text-secondary active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  /* Badges / Pill Tags */
+  .badge {
+    @apply px-2 py-0.5 rounded-sm font-mono text-[0.6rem] font-bold uppercase tracking-[0.12em] border border-transparent;
+  }
+
+  .badge-success {
+    @apply badge bg-success/10 text-success border-success/20;
+  }
+
+  .badge-warning {
+    @apply badge bg-warning/10 text-warning border-warning/20;
+  }
+
+  .badge-danger {
+    @apply badge bg-danger/10 text-danger border-danger/20;
+  }
+
+  .badge-neutral {
+    @apply badge bg-divider text-text-secondary;
+  }
+
+  /* Table Styles */
+  .soc-table {
+    @apply w-full text-left border-collapse;
+  }
+
+  .soc-table th {
+    @apply px-4 py-3 bg-elevated border-b border-divider label-mono;
+  }
+
+  .soc-table tr {
+    @apply border-b border-divider/50 transition-colors;
+  }
+
+  .soc-table tr:nth-child(even) {
+    @apply bg-surface;
+  }
+
+  .soc-table tr:nth-child(odd) {
+    @apply bg-background;
+  }
+
+  .soc-table td {
+    @apply px-4 py-3 text-sm text-text-secondary;
+  }
+
+  /* Input Fields - Aggressive Overrides for Visibility */
+  .input-soc {
+    background-color: #0A0C0F !important;
+    border: 1px solid #1E2530 !important;
+    border-radius: 4px !important;
+    padding-left: 2.5rem !important;
+    padding-right: 1rem !important;
+    padding-top: 0.5rem !important;
+    padding-bottom: 0.5rem !important;
+    font-size: 0.875rem !important;
+    color: #E8ECF0 !important;
+    outline: none !important;
+    transition: all 0.2s !important;
+  }
+
+  .input-soc:focus {
+    border-color: #00D4FF !important;
+    box-shadow: 0 0 0 1px rgba(0, 212, 255, 0.2) !important;
+  }
+
+  .input-soc::placeholder {
+    color: #3A4553 !important;
+    opacity: 1 !important;
+  }
+
+  /* Autofill Fix - Extremely Aggressive */
+  input:-webkit-autofill,
+  input:-webkit-autofill:hover,
+  input:-webkit-autofill:focus,
+  input:-webkit-autofill:active {
+    -webkit-text-fill-color: #E8ECF0 !important;
+    -webkit-box-shadow: 0 0 0px 1000px #0A0C0F inset !important;
+    transition: background-color 5000s ease-in-out 0s !important;
+  }
+}
+
+/* Custom Scrollbar - Minimal */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-background;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-divider rounded-full hover:bg-text-muted;
+}
