@@ -2,4 +2,7 @@ node_modules/
 .env
 .env.*
 dist/
-*.log
+*.logserver/forensiai.db
+server/forensiai.db-shm
+server/forensiai.db-wal
+/server/forensiai.db*
