@@ -2,7 +2,15 @@ node_modules/
 .env
 .env.*
 dist/
-*.logserver/forensiai.db
+
+*.log
+
+server/forensiai.db
 server/forensiai.db-shm
 server/forensiai.db-wal
-/server/forensiai.db*
+server/forensiai.db*
+
+# ML datasets and generated artifacts
+ml/data/
+ml/models/
+ml/artifacts/
