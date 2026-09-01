@@ -5,11 +5,11 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "node --watch index.js",
-    "test": "node test/datasetValidation.test.js && node test/datasetProfiling.test.js && node test/mlPreprocessing.test.js",
+    "test": "node test/datasetValidation.test.js && node test/datasetProfiling.test.js && node test/largeDatasetMemory.test.js && node test/mlPreprocessing.test.js",
     "test:module1": "node test/datasetValidation.test.js",
     "test:module2": "node test/datasetProfiling.test.js",
-    "test:module3": "node test/mlPreprocessing.test.js"
+    "test:module3": "node test/mlPreprocessing.test.js",
+    "test:memory": "node test/largeDatasetMemory.test.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

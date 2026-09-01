@@ -115,9 +115,13 @@ db.serialize(() => {
     columnNames TEXT NOT NULL,
     validationStatus TEXT NOT NULL,
     validationDetails TEXT,
+    profileDetails TEXT,
     uploadedBy TEXT DEFAULT 'Analyst',
     createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
+
+  // Migration: add profileDetails column if not already present
+  db.run(`ALTER TABLE datasets ADD COLUMN profileDetails TEXT`, () => {});
 
   // Optimized Indexes for High-Performance Queries
   db.run(`CREATE INDEX IF NOT EXISTS idx_timestamp ON incidents(timestamp)`);
@@ -459,6 +463,25 @@ app.post("/api/datasets/upload", (req, res) => {
   });
 });
 
+// Active Profiling Jobs tracking for live frontend progress reporting
+const activeProfilingJobs = new Map();
+
+// Progress Endpoint for live profiling status
+app.get("/api/datasets/:id/profile/progress", (req, res) => {
+  const { id } = req.params;
+  const job = activeProfilingJobs.get(id);
+  if (job) {
+    res.json(job);
+  } else {
+    res.json({
+      status: "idle",
+      rowsProcessed: 0,
+      progress: 0,
+      message: "No active profiling job running"
+    });
+  }
+});
+
 // List all ingested datasets
 app.get("/api/datasets", (req, res) => {
   db.all("SELECT * FROM datasets ORDER BY createdAt DESC", [], (err, rows) => {
@@ -469,8 +492,10 @@ app.get("/api/datasets", (req, res) => {
     const datasets = (rows || []).map(r => {
       let parsedCols = [];
       let parsedDetails = {};
+      let parsedProfile = null;
       try { parsedCols = JSON.parse(r.columnNames || "[]"); } catch (e) {}
       try { parsedDetails = JSON.parse(r.validationDetails || "{}"); } catch (e) {}
+      try { parsedProfile = JSON.parse(r.profileDetails || "null"); } catch (e) {}
 
       return {
         id: r.id,
@@ -482,6 +507,7 @@ app.get("/api/datasets", (req, res) => {
         columnNames: parsedCols,
         validationStatus: r.validationStatus,
         validationDetails: parsedDetails,
+        profile: parsedProfile,
         uploadedBy: r.uploadedBy,
         createdAt: r.createdAt
       };
@@ -503,8 +529,10 @@ app.get("/api/datasets/:id", (req, res) => {
 
     let parsedCols = [];
     let parsedDetails = {};
+    let parsedProfile = null;
     try { parsedCols = JSON.parse(row.columnNames || "[]"); } catch (e) {}
     try { parsedDetails = JSON.parse(row.validationDetails || "{}"); } catch (e) {}
+    try { parsedProfile = JSON.parse(row.profileDetails || "null"); } catch (e) {}
 
     res.json({
       id: row.id,
@@ -516,6 +544,7 @@ app.get("/api/datasets/:id", (req, res) => {
       columnNames: parsedCols,
       validationStatus: row.validationStatus,
       validationDetails: parsedDetails,
+      profile: parsedProfile,
       uploadedBy: row.uploadedBy,
       createdAt: row.createdAt
     });
@@ -541,9 +570,52 @@ app.get("/api/datasets/:id/profile", async (req, res) => {
       return res.status(404).json({ error: "Dataset source file not found on disk" });
     }
 
+    // Return cached profile if already computed for the same target column
+    let cachedProfile = null;
+    try { cachedProfile = JSON.parse(row.profileDetails || "null"); } catch (e) {}
+    if (cachedProfile && (!targetColumn || cachedProfile.target?.targetColumn === targetColumn)) {
+      return res.json({
+        datasetId: id,
+        filename: row.originalFilename || row.filename,
+        originalFilename: row.originalFilename,
+        fileSize: row.fileSize,
+        validationStatus: row.validationStatus,
+        profile: cachedProfile
+      });
+    }
+
     try {
-      console.log(`📊 Profiling Dataset: ${row.originalFilename} (${id})...`);
-      const profile = await profileDataset(filePath, { targetColumn });
+      console.log(`📊 Streaming Dataset Profiler: ${row.originalFilename} (${id})...`);
+      activeProfilingJobs.set(id, {
+        rowsProcessed: 0,
+        progress: 0,
+        status: "processing",
+        message: `Profiling ${row.originalFilename}...`,
+        startTime: Date.now()
+      });
+
+      const profile = await profileDataset(filePath, {
+        targetColumn,
+        onProgress: (p) => {
+          activeProfilingJobs.set(id, {
+            rowsProcessed: p.rowsProcessed,
+            progress: p.progress,
+            status: p.status,
+            message: `Processed ${p.rowsProcessed.toLocaleString()} rows (${p.progress}%)...`,
+            startTime: activeProfilingJobs.get(id)?.startTime || Date.now()
+          });
+        }
+      });
+
+      activeProfilingJobs.set(id, {
+        rowsProcessed: profile.summary.totalRows,
+        progress: 100,
+        status: "completed",
+        message: "Profiling completed successfully."
+      });
+
+      // Cache profile summary in SQLite
+      db.run("UPDATE datasets SET profileDetails = ? WHERE id = ?", [JSON.stringify(profile), id], () => {});
       
       res.json({
         datasetId: id,
@@ -554,6 +626,12 @@ app.get("/api/datasets/:id/profile", async (req, res) => {
         profile
       });
     } catch (profileErr) {
+      activeProfilingJobs.set(id, {
+        rowsProcessed: 0,
+        progress: 0,
+        status: "error",
+        message: profileErr.message
+      });
       console.error("❌ Profiling Engine Error:", profileErr);
       res.status(500).json({ error: `Profiling failed: ${profileErr.message}` });
     }
@@ -574,7 +652,38 @@ app.post("/api/datasets/:id/profile", async (req, res) => {
     }
 
     try {
-      const profile = await profileDataset(filePath, { targetColumn });
+      console.log(`📊 Streaming Dataset Profiler (Target Update): ${row.originalFilename} (${id})...`);
+      activeProfilingJobs.set(id, {
+        rowsProcessed: 0,
+        progress: 0,
+        status: "processing",
+        message: `Profiling ${row.originalFilename}...`,
+        startTime: Date.now()
+      });
+
+      const profile = await profileDataset(filePath, {
+        targetColumn,
+        onProgress: (p) => {
+          activeProfilingJobs.set(id, {
+            rowsProcessed: p.rowsProcessed,
+            progress: p.progress,
+            status: p.status,
+            message: `Processed ${p.rowsProcessed.toLocaleString()} rows (${p.progress}%)...`,
+            startTime: activeProfilingJobs.get(id)?.startTime || Date.now()
+          });
+        }
+      });
+
+      activeProfilingJobs.set(id, {
+        rowsProcessed: profile.summary.totalRows,
+        progress: 100,
+        status: "completed",
+        message: "Profiling completed successfully."
+      });
+
+      // Cache updated profile in SQLite
+      db.run("UPDATE datasets SET profileDetails = ? WHERE id = ?", [JSON.stringify(profile), id], () => {});
+
       res.json({
         datasetId: id,
         filename: row.originalFilename || row.filename,
@@ -584,6 +693,13 @@ app.post("/api/datasets/:id/profile", async (req, res) => {
         profile
       });
     } catch (profileErr) {
+      activeProfilingJobs.set(id, {
+        rowsProcessed: 0,
+        progress: 0,
+        status: "error",
+        message: profileErr.message
+      });
+      console.error("❌ Profiling Engine Error:", profileErr);
       res.status(500).json({ error: `Profiling failed: ${profileErr.message}` });
     }
   });

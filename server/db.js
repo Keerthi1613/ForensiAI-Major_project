@@ -45,7 +45,7 @@ db.serialize(() => {
     )
   `);
 
-  // Datasets table (Module 1: Ingestion & Validation metadata)
+  // Datasets table (Module 1: Ingestion & Validation metadata, Module 2: Profiling summary)
   db.run(`
     CREATE TABLE IF NOT EXISTS datasets (
       id TEXT PRIMARY KEY,
@@ -57,10 +57,14 @@ db.serialize(() => {
       columnNames TEXT NOT NULL,
       validationStatus TEXT NOT NULL,
       validationDetails TEXT,
+      profileDetails TEXT,
       uploadedBy TEXT DEFAULT 'Analyst',
       createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  // Migration: add profileDetails column if not already present
+  db.run(`ALTER TABLE datasets ADD COLUMN profileDetails TEXT`, () => {});
 });
 
 export const query = (sql, params = []) => {
