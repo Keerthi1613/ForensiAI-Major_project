@@ -1,16 +1,38 @@
 node_modules/
-.env
-.env.*
 dist/
 
+# Environment files and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and local build output
 *.log
+build_output*.txt
 
-server/forensiai.db
-server/forensiai.db-shm
-server/forensiai.db-wal
-server/forensiai.db*
+# Databases and sidecar files
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
 
-# ML datasets and generated artifacts
+# Uploaded datasets and generated files
+server/uploads/
+server/archive/
+
+# ML datasets, trained models, and artifacts
 ml/data/
 ml/models/
 ml/artifacts/
+
+# Scratch files and Python cache/environments
+scratch/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+server/scratch_*.js
+
+server/test/test_upload_sample.csv

@@ -2,13 +2,13 @@ import React from "react";
 import { FiActivity, FiAlertCircle, FiClock } from "react-icons/fi";
 
 const StatusBadge = ({ status }) => {
-  const s = status?.toLowerCase();
+  const s = (status || "").toLowerCase();
   const isDanger = s === "critical" || s === "high";
   const isWarning = s === "medium";
   
-  if (isDanger) return <span className="badge-danger">{status}</span>;
-  if (isWarning) return <span className="badge-warning">{status}</span>;
-  return <span className="badge-success">{status}</span>;
+  if (isDanger) return <span className="badge-danger">HIGH</span>;
+  if (isWarning) return <span className="badge-warning">MEDIUM</span>;
+  return <span className="badge-success">LOW</span>;
 };
 
 export default function Timeline({ events }) {
@@ -20,24 +20,24 @@ export default function Timeline({ events }) {
     );
   }
 
-  const ordered = [...events].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-
   return (
     <div className="relative">
       {/* Vertical Line */}
       <div className="absolute left-[7px] top-0 bottom-0 w-px bg-divider" />
 
       <div className="space-y-6">
-        {ordered.map((ev) => {
-          const s = ev.status?.toLowerCase();
+        {events.map((ev) => {
+          const rawRisk = ev.riskLevel || ev.status || "Low";
+          const s = rawRisk.toLowerCase();
           const isDanger = s === "critical" || s === "high";
+          const isWarning = s === "medium";
           
           return (
             <div key={ev.id} className="relative pl-8 group">
               {/* Timeline Dot */}
               <div className="absolute left-0 top-1.5 z-10">
                 <div className={`h-[14px] w-[14px] rounded-sm border-2 border-background shadow-tactical ${
-                  isDanger ? 'bg-danger' : 'bg-primary'
+                  isDanger ? 'bg-danger' : isWarning ? 'bg-warning' : 'bg-primary'
                 }`} />
               </div>
 
@@ -45,14 +45,16 @@ export default function Timeline({ events }) {
                 <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
                   <div className="flex items-start gap-4">
                     <div className="mt-1 text-text-muted shrink-0">
-                      {isDanger ? <FiAlertCircle size={16} className="text-danger" /> : <FiActivity size={16} className="text-primary" />}
+                      {isDanger ? <FiAlertCircle size={16} className="text-danger" /> : isWarning ? <FiAlertCircle size={16} className="text-warning" /> : <FiActivity size={16} className="text-primary" />}
                     </div>
                     <div>
                       <div className="flex items-center gap-3">
-                        <h3 className="text-sm font-bold text-text-primary tracking-tight">{ev.title}</h3>
-                        <StatusBadge status={ev.status} />
+                        <h3 className="text-sm font-bold text-text-primary tracking-tight">{ev.action || ev.title}</h3>
+                        <StatusBadge status={rawRisk} />
                       </div>
-                      <p className="text-[0.75rem] text-text-secondary mt-1 leading-relaxed max-w-2xl">{ev.description}</p>
+                      <p className="text-[0.75rem] text-text-secondary mt-1 leading-relaxed max-w-2xl">
+                        {ev.category || ev.description} {ev.sourceIp && ev.destinationIp && ev.sourceIp !== '0.0.0.0' ? `// ${ev.sourceIp} → ${ev.destinationIp}` : ''}
+                      </p>
                     </div>
                   </div>
                   <div className="flex items-center gap-2 text-[0.65rem] font-mono text-text-muted sm:text-right shrink-0 uppercase tracking-tighter">

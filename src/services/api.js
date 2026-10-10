@@ -19,6 +19,8 @@ export const register = (data) => api.post("/register", data).then(r => r.data);
 
 export const getDashboard = () => api.get("/dashboard").then(r => r.data);
 export const getIncidents = () => api.get("/incidents").then(r => r.data);
+export const getIncidentExplanation = (id) => api.get(`/incidents/${id}/explain`).then(r => r.data);
+export const explainSampleData = (sample) => api.post("/explain", { sample }).then(r => r.data);
 export const getNotifications = () => api.get("/notifications").then(r => r.data);
 export const getTimeline = () => api.get("/timeline").then(r => r.data);
 export const getReport = () => api.get("/report", { timeout: 0 }).then(r => r.data);

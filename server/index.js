@@ -13,10 +13,46 @@ import { analyzePacket } from "./ml.js";
 import { sanitizeFilename, validateDataset, parseCSVLine } from "./datasetValidator.js";
 import { profileDataset } from "./datasetProfiler.js";
 import { MLPreprocessingPipeline } from "./mlPreprocessingPipeline.js";
+import { enrichPacketsWithML, explainSample } from "./mlBridge.js";
 
 const app = express();
 const PORT = 8080;
 const SECRET_KEY = "cyber_stealth_secret_2024";
+
+export function extractSourceIp(p) {
+  if (!p || typeof p !== "object") return "0.0.0.0";
+  const val = p.sourceIp || p["Src IP"] || p["src_ip"] || p["Source IP"] || p.Source || p.src || p.source || p["Src_IP"] || p["SRC IP"] || p["Source_IP"] || p.SrcIP || p.srcIp;
+  return (val !== undefined && val !== null && String(val).trim() !== "") ? String(val).trim() : "0.0.0.0";
+}
+
+export function extractDestinationIp(p) {
+  if (!p || typeof p !== "object") return "0.0.0.0";
+  const val = p.destinationIp || p["Dst IP"] || p["dst_ip"] || p["Destination IP"] || p.Destination || p.dst || p.destination || p["Dst_IP"] || p["DST IP"] || p["Destination_IP"] || p.DstIP || p.dstIp;
+  return (val !== undefined && val !== null && String(val).trim() !== "") ? String(val).trim() : "0.0.0.0";
+}
+
+export function extractDestinationPort(p) {
+  if (!p || typeof p !== "object") return null;
+  const val = p.destinationPort || p.dstPort || p["Dst Port"] || p["dst_port"] || p["Destination Port"] || p.port || p.Port || p["Dst_Port"];
+  if (val !== undefined && val !== null && String(val).trim() !== "") {
+    const num = parseInt(val, 10);
+    return isNaN(num) ? String(val).trim() : num;
+  }
+  return null;
+}
+
+export function extractProtocol(p) {
+  if (!p || typeof p !== "object") return null;
+  const val = p.protocol || p["Protocol"] || p.proto || p.Proto;
+  if (val !== undefined && val !== null && String(val).trim() !== "") {
+    const strVal = String(val).trim();
+    if (strVal === "6") return "TCP (6)";
+    if (strVal === "17") return "UDP (17)";
+    if (strVal === "1") return "ICMP (1)";
+    return strVal;
+  }
+  return null;
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -123,6 +159,10 @@ db.serialize(() => {
   // Migration: add profileDetails column if not already present
   db.run(`ALTER TABLE datasets ADD COLUMN profileDetails TEXT`, () => {});
 
+  // Migration: add destinationPort and protocol to incidents table if not present
+  db.run(`ALTER TABLE incidents ADD COLUMN destinationPort INTEGER`, () => {});
+  db.run(`ALTER TABLE incidents ADD COLUMN protocol TEXT`, () => {});
+
   // Optimized Indexes for High-Performance Queries
   db.run(`CREATE INDEX IF NOT EXISTS idx_timestamp ON incidents(timestamp)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_risk ON incidents(riskLevel)`);
@@ -188,8 +228,8 @@ app.post("/api/ingest",(req, res) => {
     const analysis = analyzePacket(packet);
     stmt.run(
       packet.timestamp || new Date().toISOString(),
-      packet.sourceIp || "0.0.0.0",
-      packet.destinationIp || "0.0.0.0",
+      extractSourceIp(packet),
+      extractDestinationIp(packet),
       packet.userId || "system",
       packet.resource || "N/A",
       analysis.category,
@@ -232,31 +272,36 @@ app.post("/api/upload",(req, res) => {
       let buffer = [];
 
       try {
-        // Option B: Enable Turbo Mode
         db.run('PRAGMA synchronous = OFF;');
         db.run('PRAGMA journal_mode = MEMORY;');
 
         const stream = fs.createReadStream(filePath).pipe(csv());
 
         for await (const packet of stream) {
-          const analysis = analyzePacket(packet);
-          buffer.push([
-            packet.timestamp || new Date().toISOString(),
-            packet.sourceIp || "0.0.0.0",
-            packet.destinationIp || "0.0.0.0",
-            packet.userId || "system",
-            packet.resource || "N/A",
-            analysis.category,
-            analysis.riskLevel,
-            analysis.action,
-            analysis.threatScore,
-            JSON.stringify(packet)
-          ]);
+          buffer.push(packet);
 
           if (buffer.length >= SUPER_BULK_SIZE) {
-            const placeholders = buffer.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
+            await enrichPacketsWithML(buffer);
+
+            const dbRows = buffer.map((p) => {
+              const analysis = analyzePacket(p);
+              return [
+                p.timestamp || p.Timestamp || new Date().toISOString(),
+                extractSourceIp(p),
+                extractDestinationIp(p),
+                p.userId || "system",
+                p.resource || "N/A",
+                analysis.category,
+                analysis.riskLevel,
+                analysis.action,
+                analysis.threatScore,
+                JSON.stringify(p)
+              ];
+            });
+
+            const placeholders = dbRows.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
             const sql = `INSERT INTO incidents (timestamp, sourceIp, destinationIp, userId, resource, category, riskLevel, action, threatScore, raw_data) VALUES ${placeholders}`;
-            const params = buffer.flat();
+            const params = dbRows.flat();
 
             await new Promise((resolve, reject) => {
               db.run(sql, params, (err) => err ? reject(err) : resolve());
@@ -273,18 +318,36 @@ app.post("/api/upload",(req, res) => {
         }
 
         if (buffer.length > 0) {
-          const placeholders = buffer.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
+          await enrichPacketsWithML(buffer);
+
+          const dbRows = buffer.map((p) => {
+            const analysis = analyzePacket(p);
+            return [
+              p.timestamp || p.Timestamp || new Date().toISOString(),
+              extractSourceIp(p),
+              extractDestinationIp(p),
+              p.userId || "system",
+              p.resource || "N/A",
+              analysis.category,
+              analysis.riskLevel,
+              analysis.action,
+              analysis.threatScore,
+              JSON.stringify(p)
+            ];
+          });
+
+          const placeholders = dbRows.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
           const sql = `INSERT INTO incidents (timestamp, sourceIp, destinationIp, userId, resource, category, riskLevel, action, threatScore, raw_data) VALUES ${placeholders}`;
-          const params = buffer.flat();
+          const params = dbRows.flat();
           await new Promise((resolve, reject) => db.run(sql, params, (err) => err ? reject(err) : resolve()));
           count += buffer.length;
+          buffer = [];
         }
 
         console.log(`✅ Quantum Ingest Complete: ${count} signals total.`);
       } catch (err) {
         console.error("❌ Quantum Ingest Error:", err);
       } finally {
-        // Reset to Safe Mode
         db.run('PRAGMA synchronous = NORMAL;');
         db.run('PRAGMA journal_mode = WAL;');
       }
@@ -345,7 +408,6 @@ app.post("/api/datasets/upload", (req, res) => {
 
     console.log(`📥 Dataset Uplink Received: ${originalFilename} (${storedFilename})`);
 
-    // Extract authenticated user if token present
     let uploadedBy = "Analyst";
     const authHeader = req.headers["authorization"];
     const token = authHeader && authHeader.split(" ")[1];
@@ -353,13 +415,10 @@ app.post("/api/datasets/upload", (req, res) => {
       try {
         const decoded = jwt.verify(token, SECRET_KEY);
         if (decoded?.username) uploadedBy = decoded.username;
-      } catch (e) {
-        // Fall back to Analyst
-      }
+      } catch (e) {}
     }
 
     try {
-      // Execute comprehensive validation pipeline
       const validationReport = await validateDataset(filePath, {
         originalFilename,
         maxFileSize: 500 * 1024 * 1024,
@@ -370,7 +429,6 @@ app.post("/api/datasets/upload", (req, res) => {
       const datasetId = `ds_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
 
       if (!validationReport.isValid) {
-        // If invalid, clean up uploaded temporary file
         if (fs.existsSync(filePath)) {
           try { fs.unlinkSync(filePath); } catch (e) {}
         }
@@ -394,7 +452,6 @@ app.post("/api/datasets/upload", (req, res) => {
         });
       }
 
-      // Valid or Warning: Persist metadata in database
       const validationDetails = JSON.stringify({
         errors: validationReport.errors,
         warnings: validationReport.warnings,
@@ -427,6 +484,89 @@ app.post("/api/datasets/upload", (req, res) => {
       });
 
       console.log(`✅ Dataset Ingested & Validated: ${datasetId} [${validationReport.status}] (${validationReport.metadata.rowCount} rows, ${validationReport.metadata.columnCount} cols)`);
+
+      // Automatically trigger ML telemetry stream ingestion into incidents table for dashboard/views
+      setImmediate(async () => {
+        let count = 0;
+        const SUPER_BULK_SIZE = 1000;
+        let buffer = [];
+
+        try {
+          db.run('PRAGMA synchronous = OFF;');
+          db.run('PRAGMA journal_mode = MEMORY;');
+
+          const stream = fs.createReadStream(filePath).pipe(csv());
+
+          for await (const packet of stream) {
+            buffer.push(packet);
+
+            if (buffer.length >= SUPER_BULK_SIZE) {
+              await enrichPacketsWithML(buffer);
+
+              const dbRows = buffer.map((p) => {
+                const analysis = analyzePacket(p);
+                return [
+                  p.timestamp || p.Timestamp || new Date().toISOString(),
+                  extractSourceIp(p),
+                  extractDestinationIp(p),
+                  p.userId || "system",
+                  p.resource || "N/A",
+                  analysis.category,
+                  analysis.riskLevel,
+                  analysis.action,
+                  analysis.threatScore,
+                  JSON.stringify(p)
+                ];
+              });
+
+              const placeholders = dbRows.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
+              const sql = `INSERT INTO incidents (timestamp, sourceIp, destinationIp, userId, resource, category, riskLevel, action, threatScore, raw_data) VALUES ${placeholders}`;
+              const params = dbRows.flat();
+
+              await new Promise((resolve, reject) => {
+                db.run(sql, params, (err) => err ? reject(err) : resolve());
+              });
+
+              count += buffer.length;
+              buffer = [];
+            }
+          }
+
+          if (buffer.length > 0) {
+            await enrichPacketsWithML(buffer);
+
+            const dbRows = buffer.map((p) => {
+              const analysis = analyzePacket(p);
+              return [
+                p.timestamp || p.Timestamp || new Date().toISOString(),
+                extractSourceIp(p),
+                extractDestinationIp(p),
+                p.userId || "system",
+                p.resource || "N/A",
+                analysis.category,
+                analysis.riskLevel,
+                analysis.action,
+                analysis.threatScore,
+                JSON.stringify(p)
+              ];
+            });
+
+            const placeholders = dbRows.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
+            const sql = `INSERT INTO incidents (timestamp, sourceIp, destinationIp, userId, resource, category, riskLevel, action, threatScore, raw_data) VALUES ${placeholders}`;
+            const params = dbRows.flat();
+            await new Promise((resolve, reject) => db.run(sql, params, (err) => err ? reject(err) : resolve()));
+            count += buffer.length;
+            buffer = [];
+          }
+
+          console.log(`✅ Automated Incident Integration Complete: ${count} signals indexed into incidents table.`);
+        } catch (err) {
+          console.error("❌ Incident Integration Stream Error:", err);
+        } finally {
+          db.run('PRAGMA synchronous = NORMAL;');
+          db.run('PRAGMA journal_mode = WAL;');
+        }
+      });
 
       return res.status(200).json({
         success: true,
@@ -570,7 +710,6 @@ app.get("/api/datasets/:id/profile", async (req, res) => {
       return res.status(404).json({ error: "Dataset source file not found on disk" });
     }
 
-    // Return cached profile if already computed for the same target column
     let cachedProfile = null;
     try { cachedProfile = JSON.parse(row.profileDetails || "null"); } catch (e) {}
     if (cachedProfile && (!targetColumn || cachedProfile.target?.targetColumn === targetColumn)) {
@@ -614,9 +753,8 @@ app.get("/api/datasets/:id/profile", async (req, res) => {
         message: "Profiling completed successfully."
       });
 
-      // Cache profile summary in SQLite
       db.run("UPDATE datasets SET profileDetails = ? WHERE id = ?", [JSON.stringify(profile), id], () => {});
-      
+
       res.json({
         datasetId: id,
         filename: row.originalFilename || row.filename,
@@ -681,7 +819,6 @@ app.post("/api/datasets/:id/profile", async (req, res) => {
         message: "Profiling completed successfully."
       });
 
-      // Cache updated profile in SQLite
       db.run("UPDATE datasets SET profileDetails = ? WHERE id = ?", [JSON.stringify(profile), id], () => {});
 
       res.json({
@@ -769,7 +906,6 @@ app.post("/api/datasets/:id/preprocess", async (req, res) => {
         return res.status(400).json({ error: "Dataset contains no data rows to preprocess" });
       }
 
-      // Step 1: Train / Test Split BEFORE fitting (Zero Data Leakage)
       const { trainRows, testRows } = MLPreprocessingPipeline.trainTestSplit(rows, {
         testSize: Number(testSize),
         shuffle: true,
@@ -777,7 +913,6 @@ app.post("/api/datasets/:id/preprocess", async (req, res) => {
         targetColumn
       });
 
-      // Step 2: Instantiate Pipeline
       const pipeline = new MLPreprocessingPipeline({
         targetColumn: targetColumn || null,
         numericalScaling,
@@ -787,10 +922,8 @@ app.post("/api/datasets/:id/preprocess", async (req, res) => {
         randomSeed: Number(randomSeed)
       });
 
-      // Step 3: Fit STRICTLY on training split
       pipeline.fit(trainRows);
 
-      // Step 4: Transform train and test splits
       const trainTransformed = pipeline.transform(trainRows);
       const testTransformed = pipeline.transform(testRows);
 
@@ -850,7 +983,7 @@ app.get("/api/datasets/:id/preprocess/schema", async (req, res) => {
     try {
       const { rows } = await loadCsvRows(filePath);
       const pipeline = new MLPreprocessingPipeline({ targetColumn });
-      pipeline.fit(rows.slice(0, 100)); // Quick fit on sample for schema preview
+      pipeline.fit(rows.slice(0, 100));
 
       res.json({
         datasetId: id,
@@ -910,7 +1043,6 @@ app.post("/api/archive/ingest",(req, res) => {
     return res.status(404).json({ error: "Archive file not found" });
   }
 
-  // Quantum-Stream Bulk Ingestion for Archives
   (async () => {
     let count = 0;
     const SUPER_BULK_SIZE = 1000;
@@ -922,33 +1054,39 @@ app.post("/api/archive/ingest",(req, res) => {
 
       const stream = fs.createReadStream(filePath).pipe(csv());
       for await (const row of stream) {
-        const packet = {
-          timestamp: row.timestamp || row.Timestamp || new Date().toISOString(),
-          sourceIp: row.sourceIp || row.Source || row.src || "0.0.0.0",
-          destinationIp: row.destinationIp || row.Destination || row.dst || "0.0.0.0",
-          userId: row.userId || "system",
-          resource: row.resource || "N/A",
-          category: row.category || row.Label || "Unclassified"
-        };
-        const analysis = analyzePacket(packet);
-
-        buffer.push([
-          packet.timestamp,
-          packet.sourceIp,
-          packet.destinationIp,
-          packet.userId,
-          packet.resource,
-          analysis.category,
-          analysis.riskLevel,
-          analysis.action,
-          analysis.threatScore,
-          JSON.stringify(row)
-        ]);
+        buffer.push(row);
 
         if (buffer.length >= SUPER_BULK_SIZE) {
-          const placeholders = buffer.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
+          await enrichPacketsWithML(buffer);
+
+          const dbRows = buffer.map((r) => {
+            const packet = {
+              timestamp: r.timestamp || r.Timestamp || new Date().toISOString(),
+              sourceIp: extractSourceIp(r),
+              destinationIp: extractDestinationIp(r),
+              userId: r.userId || "system",
+              resource: r.resource || "N/A",
+              category: r.category || r.Label || "Unclassified"
+            };
+            const analysis = analyzePacket(packet);
+
+            return [
+              packet.timestamp,
+              packet.sourceIp,
+              packet.destinationIp,
+              packet.userId,
+              packet.resource,
+              analysis.category,
+              analysis.riskLevel,
+              analysis.action,
+              analysis.threatScore,
+              JSON.stringify(r)
+            ];
+          });
+
+          const placeholders = dbRows.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
           const sql = `INSERT INTO incidents (timestamp, sourceIp, destinationIp, userId, resource, category, riskLevel, action, threatScore, raw_data) VALUES ${placeholders}`;
-          const params = buffer.flat();
+          const params = dbRows.flat();
 
           await new Promise((resolve, reject) => {
             db.run(sql, params, (err) => err ? reject(err) : resolve());
@@ -964,11 +1102,39 @@ app.post("/api/archive/ingest",(req, res) => {
       }
 
       if (buffer.length > 0) {
-        const placeholders = buffer.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
+        await enrichPacketsWithML(buffer);
+
+        const dbRows = buffer.map((r) => {
+          const packet = {
+            timestamp: r.timestamp || r.Timestamp || new Date().toISOString(),
+            sourceIp: extractSourceIp(r),
+            destinationIp: extractDestinationIp(r),
+            userId: r.userId || "system",
+            resource: r.resource || "N/A",
+            category: r.category || r.Label || "Unclassified"
+          };
+          const analysis = analyzePacket(packet);
+
+          return [
+            packet.timestamp,
+            packet.sourceIp,
+            packet.destinationIp,
+            packet.userId,
+            packet.resource,
+            analysis.category,
+            analysis.riskLevel,
+            analysis.action,
+            analysis.threatScore,
+            JSON.stringify(r)
+          ];
+        });
+
+        const placeholders = dbRows.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
         const sql = `INSERT INTO incidents (timestamp, sourceIp, destinationIp, userId, resource, category, riskLevel, action, threatScore, raw_data) VALUES ${placeholders}`;
-        const params = buffer.flat();
+        const params = dbRows.flat();
         await new Promise((resolve, reject) => db.run(sql, params, (err) => err ? reject(err) : resolve()));
         count += buffer.length;
+        buffer = [];
       }
 
       console.log(`✅ Quantum Archive Complete: ${count} signals total.`);
@@ -986,13 +1152,18 @@ app.post("/api/archive/ingest",(req, res) => {
 app.get("/api/dashboard",async (req, res) => {
   console.log("📊 Dashboard Request Received...");
   try {
-    // Perform high-speed SQL aggregations
-    console.log("--- Executing SQL Aggregations ---");
     const totalLogs = await new Promise((resolve) => db.get("SELECT COUNT(*) as count FROM incidents", (err, row) => resolve(row?.count || 0)));
     console.log(`--- Total Logs: ${totalLogs} ---`);
 
     const suspiciousEvents = await new Promise((resolve) => db.get("SELECT COUNT(*) as count FROM incidents WHERE riskLevel != 'Low'", (err, row) => resolve(row?.count || 0)));
     const activeIncidents = await new Promise((resolve) => db.get("SELECT COUNT(*) as count FROM incidents WHERE riskLevel = 'High'", (err, row) => resolve(row?.count || 0)));
+    const lowCount = await new Promise((resolve) => db.get("SELECT COUNT(*) as count FROM incidents WHERE riskLevel = 'Low'", (err, row) => resolve(row?.count || 0)));
+    const mediumCount = await new Promise((resolve) => db.get("SELECT COUNT(*) as count FROM incidents WHERE riskLevel = 'Medium'", (err, row) => resolve(row?.count || 0)));
+    const highCount = activeIncidents;
+
+    const lowPercentage = totalLogs > 0 ? Number(((lowCount / totalLogs) * 100).toFixed(1)) : 0;
+    const mediumPercentage = totalLogs > 0 ? Number(((mediumCount / totalLogs) * 100).toFixed(1)) : 0;
+    const highPercentage = totalLogs > 0 ? Number(((highCount / totalLogs) * 100).toFixed(1)) : 0;
 
     const categoryData = await new Promise((resolve) => {
       db.all("SELECT category as name, COUNT(*) as value FROM incidents GROUP BY category ORDER BY value DESC LIMIT 10", (err, rows) => resolve(rows || []));
@@ -1003,15 +1174,31 @@ app.get("/api/dashboard",async (req, res) => {
     });
 
     const recentAlerts = await new Promise((resolve) => {
-      db.all("SELECT * FROM incidents WHERE riskLevel = 'High' ORDER BY id DESC LIMIT 5", (err, rows) => resolve(rows || []));
+      db.all("SELECT * FROM incidents WHERE riskLevel != 'Low' ORDER BY id DESC LIMIT 5", (err, rows) => {
+        if (!err && rows && rows.length > 0) return resolve(rows);
+        db.all("SELECT * FROM incidents ORDER BY id DESC LIMIT 5", (err2, rows2) => resolve(rows2 || []));
+      });
     });
+
+    let computedRiskLevel = "Low";
+    if (highCount > 0 || suspiciousEvents > totalLogs * 0.2) {
+      computedRiskLevel = "High";
+    } else if (mediumCount > 0 || suspiciousEvents > 0) {
+      computedRiskLevel = "Medium";
+    }
 
     console.log("✅ Dashboard Data Synthesized.");
     res.json({
       totalLogs,
       suspiciousEvents,
       activeIncidents,
-      riskLevel: suspiciousEvents > (totalLogs * 0.3) ? "High" : "Low",
+      lowCount,
+      mediumCount,
+      highCount,
+      lowPercentage,
+      mediumPercentage,
+      highPercentage,
+      riskLevel: computedRiskLevel,
       lineChartData: timeData,
       barChartData: categoryData.map(c => ({
         name: c.name.length > 15 ? c.name.substring(0, 12) + '...' : c.name,
@@ -1026,30 +1213,79 @@ app.get("/api/dashboard",async (req, res) => {
 });
 
 app.get("/api/incidents",(req, res) => {
-  db.all("SELECT * FROM incidents ORDER BY id DESC LIMIT 100", [], (err, rows) => {
+  db.all("SELECT * FROM incidents ORDER BY CASE WHEN riskLevel = 'High' THEN 1 WHEN riskLevel = 'Medium' THEN 2 ELSE 3 END, id DESC LIMIT 200", [], (err, rows) => {
     if (err) return res.sendStatus(500);
     res.json(rows);
   });
 });
 
+app.get("/api/incidents/:id/explain", async (req, res) => {
+  const { id } = req.params;
+  db.get("SELECT * FROM incidents WHERE id = ?", [id], async (err, row) => {
+    if (err) return res.status(500).json({ error: "Database query error" });
+    if (!row) return res.status(404).json({ error: "Incident not found" });
+
+    try {
+      let rawData = {};
+      if (row.raw_data) {
+        try { rawData = JSON.parse(row.raw_data); } catch (e) {}
+      }
+      const sample = { ...rawData };
+      if (row.destinationPort && !sample["Dst Port"] && !sample["destinationPort"]) {
+        sample["Dst Port"] = row.destinationPort;
+      }
+      if (row.protocol && !sample["Protocol"] && !sample["protocol"]) {
+        sample["Protocol"] = row.protocol;
+      }
+      const explanation = await explainSample(sample);
+      res.json({
+        incidentId: row.id,
+        sourceIp: row.sourceIp,
+        destinationIp: row.destinationIp,
+        destinationPort: row.destinationPort || extractDestinationPort(sample),
+        protocol: row.protocol || extractProtocol(sample),
+        ...explanation
+      });
+    } catch (expErr) {
+      console.error("❌ SHAP Explanation Endpoint Error:", expErr);
+      res.status(500).json({ error: `SHAP calculation failed: ${expErr.message}` });
+    }
+  });
+});
+
+app.post("/api/explain", async (req, res) => {
+  const sample = req.body.sample || req.body.raw_data || req.body;
+  try {
+    const explanation = await explainSample(sample);
+    res.json(explanation);
+  } catch (expErr) {
+    console.error("❌ SHAP Explanation Endpoint Error:", expErr);
+    res.status(500).json({ error: `SHAP calculation failed: ${expErr.message}` });
+  }
+});
+
 app.get("/api/notifications",(req, res) => {
-  db.all("SELECT * FROM incidents WHERE riskLevel = 'High' ORDER BY id DESC LIMIT 5", [], (err, rows) => {
+  db.all("SELECT * FROM incidents WHERE riskLevel != 'Low' ORDER BY id DESC LIMIT 5", [], (err, rows) => {
     if (err) return res.sendStatus(500);
     const notifications = rows.map(r => ({
       id: r.id,
-      title: `Critical Alert: ${r.action}`,
+      title: `Alert: ${r.action}`,
       timestamp: new Date(r.timestamp).toLocaleTimeString(),
-      riskLevel: "High"
+      riskLevel: r.riskLevel
     }));
     res.json(notifications);
   });
 });
 
 app.get("/api/timeline",(req, res) => {
-  db.all("SELECT id, timestamp, action as title, category as description, riskLevel as status FROM incidents ORDER BY id DESC LIMIT 20", [], (err, rows) => {
-    if (err) return res.sendStatus(500);
-    res.json(rows);
-  });
+  db.all(
+    "SELECT id, timestamp, sourceIp, destinationIp, category, riskLevel, action, threatScore, action as title, category as description, riskLevel as status FROM incidents ORDER BY CASE WHEN riskLevel = 'High' THEN 1 WHEN riskLevel = 'Medium' THEN 2 ELSE 3 END, id DESC LIMIT 50",
+    [],
+    (err, rows) => {
+      if (err) return res.sendStatus(500);
+      res.json(rows);
+    }
+  );
 });
 
 import { getKnowledgeForIncident } from "./knowledge_base.js";
@@ -1110,7 +1346,11 @@ app.get("/api/report",async (req, res) => {
     const medium = await new Promise((resolve) => db.get("SELECT COUNT(*) as count FROM incidents WHERE riskLevel = 'Medium'", (err, row) => resolve(Number(row?.count || 0))));
     const low = await new Promise((resolve) => db.get("SELECT COUNT(*) as count FROM incidents WHERE riskLevel = 'Low'", (err, row) => resolve(Number(row?.count || 0))));
 
-    console.log(`📊 Report Stats: Total=${total}, High=${high}`);
+    const lowPct = total > 0 ? Number(((low / total) * 100).toFixed(1)) : 0;
+    const mediumPct = total > 0 ? Number(((medium / total) * 100).toFixed(1)) : 0;
+    const highPct = total > 0 ? Number(((high / total) * 100).toFixed(1)) : 0;
+
+    console.log(`📊 Report Stats: Total=${total}, High=${high}, Medium=${medium}, Low=${low}`);
 
     const categoryBreakdown = await new Promise((resolve) => {
       db.all("SELECT category as name, COUNT(*) as count FROM incidents GROUP BY category ORDER BY count DESC", (err, rows) => resolve(rows || []));
@@ -1124,10 +1364,13 @@ app.get("/api/report",async (req, res) => {
     const avgScore = avgScoreResult ? Number(avgScoreResult).toFixed(1) : "0.0";
 
     const recentHighRisk = await new Promise((resolve) => {
-      db.all("SELECT sourceIp, destinationIp, category, action, threatScore, timestamp FROM incidents WHERE riskLevel = 'High' ORDER BY id DESC LIMIT 5", (err, rows) => resolve(rows || []));
+      db.all("SELECT sourceIp, destinationIp, category, action, threatScore, timestamp FROM incidents WHERE riskLevel != 'Low' ORDER BY id DESC LIMIT 5", (err, rows) => {
+        if (!err && rows && rows.length > 0) return resolve(rows);
+        db.all("SELECT sourceIp, destinationIp, category, action, threatScore, timestamp FROM incidents ORDER BY id DESC LIMIT 5", (err2, rows2) => resolve(rows2 || []));
+      });
     });
 
-    const riskScore = high > (total * 0.3) ? "Critical" : high > (total * 0.1) ? "High" : total > 0 ? "Stable" : "No Data";
+    const riskScore = high > (total * 0.2) ? "Critical" : (high > 0 || medium > (total * 0.2)) ? "High" : (medium > 0) ? "Medium" : total > 0 ? "Stable" : "No Data";
 
     console.log("✅ Report Synthesis Complete.");
     res.json({
@@ -1135,6 +1378,9 @@ app.get("/api/report",async (req, res) => {
       generationTime: new Date().toISOString(),
       incidents: total,
       high, medium, low,
+      lowPercentage: lowPct,
+      mediumPercentage: mediumPct,
+      highPercentage: highPct,
       avgThreatScore: avgScore,
       riskScore,
       categoryBreakdown,
@@ -1149,9 +1395,14 @@ app.get("/api/report",async (req, res) => {
 
 const server = app.listen(PORT, () => {
   console.log(`SOC ENGINE ACTIVE ON PORT ${PORT}`);
+}).on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.log(`Port ${PORT} is already active.`);
+  } else {
+    console.error("Server listen error:", err);
+  }
 });
 
-// Hardened connection settings for large forensic uplinks
-server.timeout = 600000; // 10 minutes
+server.timeout = 600000;
 server.keepAliveTimeout = 610000;
 server.headersTimeout = 620000;

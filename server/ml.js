@@ -1,4 +1,4 @@
-// ForensiAI — Pattern-based threat analysis engine
+// ForensiAI — Threat Analysis Engine with XGBoost ML Integration & Heuristic Fallback
 
 const THREAT_SIGNATURES = [
   { pattern: /scan|probe|nmap|sweep/i, category: "Port Scan", risk: "Medium", score: [55, 70] },
@@ -21,12 +21,69 @@ const KNOWN_MALICIOUS_RANGES = [
 const SENSITIVE_PORTS = [22, 23, 3389, 445, 135, 4444, 6666, 1337];
 
 export const analyzePacket = (packet) => {
+  // 1. Primary Path: Use ML inference results if enriched by ML bridge
+  if (typeof packet.mlAttackProbability === "number") {
+    const mlScore = packet.mlAttackProbability * 100;
+    let riskLevel = "Low";
+    let action = "Logged";
+
+    if (packet.mlRiskLevel) {
+      const rlUpper = String(packet.mlRiskLevel).toUpperCase();
+      if (rlUpper === "HIGH") {
+        riskLevel = "High";
+        action = "Mitigation Active";
+      } else if (rlUpper === "MEDIUM") {
+        riskLevel = "Medium";
+        action = "Monitoring Escalated";
+      } else {
+        riskLevel = "Low";
+        action = "Logged";
+      }
+    } else {
+      // Risk Engine rules fallback:
+      // HIGH: prob >= 0.80 OR (pred == ATTACK and anomaly)
+      // MEDIUM: prob >= 0.50 OR anomaly
+      const isAttackPred = packet.mlPrediction === "ATTACK";
+      const isAnomaly = Boolean(packet.mlAnomaly);
+
+      if (packet.mlAttackProbability >= 0.80 || (isAttackPred && isAnomaly)) {
+        riskLevel = "High";
+        action = "Mitigation Active";
+      } else if (packet.mlAttackProbability >= 0.50 || isAnomaly) {
+        riskLevel = "Medium";
+        action = "Monitoring Escalated";
+      } else {
+        riskLevel = "Low";
+        action = "Logged";
+      }
+    }
+
+    let category = packet.category || packet.Label || packet.label || "General Traffic";
+    if (packet.mlAttackType && String(packet.mlAttackType).toUpperCase() !== "BENIGN") {
+      category = packet.mlAttackType;
+    } else if (category === "Benign" || category === "BENIGN") {
+      category = packet.mlPrediction === "ATTACK" ? "Anomaly Traffic" : "Normal Traffic";
+    }
+
+    return {
+      category,
+      riskLevel,
+      action,
+      threatScore: parseFloat(mlScore.toFixed(2)),
+      anomaly: packet.mlAnomaly !== undefined ? packet.mlAnomaly : false,
+      anomalyLabel: packet.mlAnomalyLabel || (packet.mlAnomaly ? "YES" : "NO"),
+      model: packet.mlModel || "Combined XGBoost + Isolation Forest",
+      attackType: packet.mlAttackType || (packet.mlPrediction === "ATTACK" ? "Unknown Attack" : "BENIGN")
+    };
+  }
+
+  // 2. Fallback Path: Pattern-based threat signatures if ML is unavailable
   let category = "General Traffic";
   let riskLevel = "Low";
   let action = "Logged";
   let score = Math.random() * 30; // base noise
 
-  // 1. Match against threat signatures in label/category/action fields
+  // Match against threat signatures in label/category/action fields
   const textToScan = [packet.category, packet.label, packet.action, packet.details, packet.description]
     .filter(Boolean).join(" ");
 
@@ -39,14 +96,14 @@ export const analyzePacket = (packet) => {
     }
   }
 
-  // 2. Malicious source IP heuristics
-  const srcIp = packet.sourceIp || packet.Source || packet.src || "";
+  // Malicious source IP heuristics
+  const srcIp = packet.sourceIp || packet["Src IP"] || packet["src_ip"] || packet["Source IP"] || packet.Source || packet.src || packet.source || "";
   if (KNOWN_MALICIOUS_RANGES.some(range => srcIp.startsWith(range))) {
     score = Math.min(score + 20, 99);
     if (riskLevel === "Low") riskLevel = "Medium";
   }
 
-  // 3. Sensitive port targeting
+  // Sensitive port targeting
   const dstPort = parseInt(packet.dstPort || packet.port || packet.destinationPort || 0);
   if (SENSITIVE_PORTS.includes(dstPort)) {
     score = Math.min(score + 15, 99);
@@ -56,7 +113,7 @@ export const analyzePacket = (packet) => {
     }
   }
 
-  // 4. Final risk bucketing
+  // Final risk bucketing
   if (score > 75) {
     riskLevel = "High";
     action = "Mitigation Active";
